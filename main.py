@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
-from datetime import date
+from datetime import date, datetime, timezone
 import json
 import csv
 import io
@@ -18,18 +18,21 @@ from models import (
 )
 from database import (
     init_db, save_sleep_record, get_sleep_records,
-    save_anomaly, get_anomalies,
+    save_anomaly, delete_anomalies_in_range, get_anomalies,
     save_user_context, get_user_context
 )
 from analyzer import analyze_sleep, calculate_sleep_score
 from recommendations import generate_recommendations
 
-# Импортируем симулятор
-import importlib.util
-spec = importlib.util.spec_from_file_location("simulator", Path(__file__).parent / "connectors" / "simulator.py")
-simulator_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(simulator_module)
-SimulatorConnector = simulator_module.SimulatorConnector
+# Нормальный импорт симулятора (вместо importlib.util)
+from connectors.simulator import SimulatorConnector
+
+# ─────────────────────────────────────────
+#  КОНСТАНТЫ
+# ─────────────────────────────────────────
+
+MAX_CSV_BYTES = 10 * 1024 * 1024  # 10 МБ — защита от DoS
+MAX_CSV_ROWS = 1000
 
 # ─────────────────────────────────────────
 #  ИНИЦИАЛИЗАЦИЯ
@@ -53,6 +56,21 @@ app.add_middleware(
 async def startup():
     init_db()
     print("🚀 Sleep Analyzer API запущен")
+
+
+# ─────────────────────────────────────────
+#  ВСПОМОГАТЕЛЬНЫЕ
+# ─────────────────────────────────────────
+
+def _parse_iso_datetime(value: str) -> datetime:
+    """Парсит ISO datetime с учётом timezone. Без tz считаем UTC."""
+    s = value.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 # ─────────────────────────────────────────
@@ -133,77 +151,37 @@ async def get_summary(user_id: str = "default"):
 
 
 # ─────────────────────────────────────────
-#  GADGETBRIDGE — HTTP ХУКИ
-# ─────────────────────────────────────────
-
-@app.post("/api/gadgetbridge/webhook")
-async def gadgetbridge_webhook(payload: dict):
-    """
-    Принимает данные напрямую от Gadgetbridge.
-    Настройте URL в Gadgetbridge: http://ВАШ_IP:8000/api/gadgetbridge/webhook
-    """
-    try:
-        # Gadgetbridge шлёт данные активности — парсим сон
-        sleep_data = _parse_gadgetbridge_payload(payload)
-        if sleep_data:
-            save_sleep_record(sleep_data)
-            return {"status": "ok", "message": "Данные сна сохранены"}
-        return {"status": "ok", "message": "Данные активности получены (не сон)"}
-
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-def _parse_gadgetbridge_payload(payload: dict) -> Optional[dict]:
-    """Парсит webhook от Gadgetbridge в универсальный формат"""
-    # Gadgetbridge шлёт данные в формате activity samples
-    # Фильтруем только ночные данные (raw_kind = 112 для Huami/Amazfit)
-    if "sleep" not in payload and "activity" not in payload:
-        return None
-
-    sleep = payload.get("sleep", {})
-    if not sleep:
-        return None
-
-    return {
-        "date": sleep.get("date", str(date.today())),
-        "start_time": sleep.get("start", ""),
-        "end_time": sleep.get("end", ""),
-        "duration_minutes": sleep.get("duration", 0),
-        "phase_light": sleep.get("lightSleepDuration", 0),
-        "phase_deep": sleep.get("deepSleepDuration", 0),
-        "phase_rem": sleep.get("remSleepDuration", 0),
-        "phase_awake": sleep.get("awakeDuration", 0),
-        "heart_rate_avg": sleep.get("heartRateAverage"),
-        "heart_rate_min": sleep.get("heartRateMin"),
-        "heart_rate_max": sleep.get("heartRateMax"),
-        "spo2_avg": sleep.get("spo2Average"),
-        "spo2_min": sleep.get("spo2Min"),
-        "awakenings_count": sleep.get("wakeupCount", 0),
-        "source": "gadgetbridge",
-        "sleep_score": None
-    }
-
-
-# ─────────────────────────────────────────
-#  CSV ЗАГРУЗКА
+#  CSV ЗАГРУЗКА (10 МБ, стримово)
 # ─────────────────────────────────────────
 
 @app.post("/api/upload/csv")
 async def upload_csv(file: UploadFile = File(...), user_id: str = "default"):
     """
     Загружает данные сна из CSV файла.
-    Поддерживает два формата:
-    1. Стандартный датасет (smartwatch_sleep_dataset.csv)
-    2. Простой формат (date, duration_minutes, phase_deep, ...)
+    Лимит: 10 МБ, 1000 строк (стримовое чтение).
     """
-    if not file.filename.endswith(".csv"):
+    if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Файл должен быть в формате CSV")
 
-    raw = await file.read()
+    # Стримово читаем максимум MAX_CSV_BYTES
+    chunks = []
+    total_size = 0
+    while True:
+        chunk = await file.read(64 * 1024)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > MAX_CSV_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Файл слишком большой (максимум {MAX_CSV_BYTES // (1024 * 1024)} МБ)"
+            )
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+
     try:
         text = raw.decode("utf-8")
-    except:
+    except UnicodeDecodeError:
         text = raw.decode("latin-1")
 
     reader = csv.DictReader(io.StringIO(text))
@@ -212,16 +190,13 @@ async def upload_csv(file: UploadFile = File(...), user_id: str = "default"):
     saved_count = 0
     errors = []
 
-    # Определяем формат по заголовкам
     is_rich_format = "sleep_start_timestamp" in headers or "date_recorded" in headers
 
     for i, row in enumerate(reader):
-        # Лимит 500 записей на загрузку
-        if saved_count >= 500:
+        if saved_count >= MAX_CSV_ROWS:
             break
         try:
             if is_rich_format:
-                # Богатый формат (smartwatch_sleep_dataset.csv)
                 date_str = row.get("date_recorded", row.get("date", ""))[:10]
                 start_time = row.get("sleep_start_timestamp", row.get("start_time", ""))
                 end_time = row.get("sleep_end_timestamp", row.get("end_time", ""))
@@ -241,15 +216,10 @@ async def upload_csv(file: UploadFile = File(...), user_id: str = "default"):
                 score   = int(float(row["sleep_score"]))     if row.get("sleep_score")          else None
                 awake_c = int(float(row.get("wake_after_sleep_onset_minutes", 0)))
 
-                # Если дат повторяются - добавляем индекс
-                unique_date = date_str
-                if not date_str:
-                    continue
-
                 data = {
-                    "date": unique_date,
-                    "start_time": start_time or date_str + " 23:00:00",
-                    "end_time": end_time or date_str + " 07:00:00",
+                    "date": date_str,
+                    "start_time": start_time,
+                    "end_time": end_time,
                     "duration_minutes": duration,
                     "phase_deep":  int(total * deep_pct),
                     "phase_light": int(total * light_pct),
@@ -265,7 +235,6 @@ async def upload_csv(file: UploadFile = File(...), user_id: str = "default"):
                     "source": "csv",
                 }
             else:
-                # Простой формат
                 data = {
                     "date": row.get("date", ""),
                     "start_time": row.get("start_time", ""),
@@ -288,9 +257,7 @@ async def upload_csv(file: UploadFile = File(...), user_id: str = "default"):
             if not data["date"]:
                 continue
 
-            # Используем user_id из CSV если есть, иначе дефолтный
-            csv_user = row.get("user_id", user_id) or user_id
-            save_sleep_record(data, csv_user)
+            save_sleep_record(data, user_id)
             saved_count += 1
 
         except Exception as e:
@@ -353,13 +320,13 @@ async def run_analysis(user_id: str = "default"):
     - Пересчитывает Sleep Score
     - Выявляет аномалии (правила + ML)
     - Генерирует рекомендации
+    Старые аномалии за период удаляются перед записью новых.
     """
     raw_records = get_sleep_records(user_id=user_id, limit=90)
 
     if not raw_records:
         raise HTTPException(status_code=404, detail="Нет данных для анализа")
 
-    # Конвертируем в SleepRecord (приводим типы — SQLite возвращает строки)
     def _int(v): return int(v) if v is not None else 0
     def _float(v): return float(v) if v is not None else None
 
@@ -392,7 +359,12 @@ async def run_analysis(user_id: str = "default"):
     # Анализ
     analyzed_records, anomalies = analyze_sleep(records)
 
-    # Сохраняем аномалии
+    # Удаляем старые аномалии за анализируемый период перед записью новых
+    if records:
+        dates = [str(r.date) for r in records]
+        delete_anomalies_in_range(user_id=user_id, dates=dates)
+
+    # Сохраняем новые аномалии
     for anomaly in anomalies:
         save_anomaly({
             "sleep_record_id": anomaly.sleep_record_id,
@@ -413,7 +385,7 @@ async def run_analysis(user_id: str = "default"):
     return {
         "analyzed": len(analyzed_records),
         "anomalies_found": len(anomalies),
-        "recommendations": len(recommendations),
+        "recommendations_count": len(recommendations),
         "anomalies": [
             {
                 "date": str(a.date),
@@ -453,21 +425,18 @@ async def get_anomalies_endpoint(user_id: str = "default", days: int = 30):
 @app.post("/api/context")
 async def create_context(context: UserContextCreate, user_id: str = "default"):
     """Сохраняет запись вечернего дневника"""
-    try:
-        data = {
-            "date": str(context.date),
-            "caffeine_after_15": bool(context.caffeine_after_15),
-            "alcohol": bool(context.alcohol),
-            "stress_level": int(context.stress_level),
-            "physical_activity": bool(context.physical_activity),
-            "screen_before_bed": bool(context.screen_before_bed),
-            "late_meal": bool(context.late_meal),
-            "notes": context.notes or None,
-        }
-        save_user_context(data, user_id)
-        return {"status": "saved"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка сохранения: {str(e)}")
+    data = {
+        "date": str(context.date),
+        "caffeine_after_15": bool(context.caffeine_after_15),
+        "alcohol": bool(context.alcohol),
+        "stress_level": int(context.stress_level),
+        "physical_activity": bool(context.physical_activity),
+        "screen_before_bed": bool(context.screen_before_bed),
+        "late_meal": bool(context.late_meal),
+        "notes": context.notes
+    }
+    save_user_context(data, user_id)
+    return {"status": "saved"}
 
 
 @app.get("/api/context")
@@ -490,40 +459,33 @@ async def root():
 
 
 # ─────────────────────────────────────────
-#  HEALTH CONNECT
+#  HEALTH CONNECT (с корректным timezone)
 # ─────────────────────────────────────────
 
 @app.post("/api/health-connect")
 async def receive_health_connect(payload: dict, user_id: str = "default"):
     """
     Принимает данные сна из Health Connect (Android).
-    Вызывается из React Native через fetch после чтения Health Connect API.
-
-    Формат payload:
-    {
-      "sleepSessions": [
-        {
-          "startTime": "2024-04-03T22:36:00",
-          "endTime": "2024-04-04T06:01:00",
-          "stages": [
-            {"stage": 4, "startTime": "...", "endTime": "..."},  // 4=deep, 3=light, 5=rem, 2=awake
-          ]
-        }
-      ]
-    }
+    Корректно обрабатывает timezone — дата сна определяется
+    по локальному времени засыпания, а не по UTC.
     """
     sessions = payload.get("sleepSessions", [])
     saved = 0
 
     for session in sessions:
         try:
-            from datetime import datetime
             start = session.get("startTime", "")
             end   = session.get("endTime", "")
+            if not start or not end:
+                continue
 
-            start_dt = datetime.fromisoformat(start.replace("Z", ""))
-            end_dt   = datetime.fromisoformat(end.replace("Z", ""))
+            start_dt = _parse_iso_datetime(start)
+            end_dt   = _parse_iso_datetime(end)
             duration = int((end_dt - start_dt).total_seconds() / 60)
+            if duration <= 0:
+                continue
+
+            # Дата сна = локальная дата начала сна (по tz клиента)
             date_str = start_dt.strftime("%Y-%m-%d")
 
             # Подсчёт фаз из stages
@@ -531,9 +493,9 @@ async def receive_health_connect(payload: dict, user_id: str = "default"):
             deep = light = rem = awake = 0
             for s in stages:
                 stage_type = s.get("stage", 0)
-                s_start = datetime.fromisoformat(s["startTime"].replace("Z", ""))
-                s_end   = datetime.fromisoformat(s["endTime"].replace("Z", ""))
-                mins = int((s_end - s_start).total_seconds() / 60)
+                s_start = _parse_iso_datetime(s["startTime"])
+                s_end   = _parse_iso_datetime(s["endTime"])
+                mins = max(0, int((s_end - s_start).total_seconds() / 60))
                 if stage_type == 4:   deep  += mins
                 elif stage_type == 3: light += mins
                 elif stage_type == 5: rem   += mins
@@ -541,8 +503,8 @@ async def receive_health_connect(payload: dict, user_id: str = "default"):
 
             data = {
                 "date": date_str,
-                "start_time": start,
-                "end_time": end,
+                "start_time": start_dt.isoformat(),
+                "end_time": end_dt.isoformat(),
                 "duration_minutes": duration,
                 "phase_deep":  deep,
                 "phase_light": light,
@@ -568,7 +530,8 @@ async def receive_health_connect(payload: dict, user_id: str = "default"):
 
 
 # ─────────────────────────────────────────
-#  GADGETBRIDGE — улучшенный webhook
+#  GADGETBRIDGE — единственный webhook
+#  (deep больше НЕ fallback'ит на light)
 # ─────────────────────────────────────────
 
 @app.post("/api/gadgetbridge/webhook")
@@ -580,51 +543,54 @@ async def gadgetbridge_webhook(payload: dict, user_id: str = "default"):
     https://ВАШ-ПРОЕКТ.up.railway.app/api/gadgetbridge/webhook
     """
     try:
-        from datetime import datetime, date as date_type
-
-        # Gadgetbridge может слать разные форматы
         sleep = payload.get("sleep") or payload.get("Sleep") or {}
-        activity = payload.get("activity") or []
 
-        if not sleep and not activity:
+        if not sleep:
             return {"status": "ok", "message": "Нет данных сна в payload"}
 
-        if sleep:
-            start_ts = sleep.get("start", sleep.get("startTime", 0))
-            end_ts   = sleep.get("end",   sleep.get("endTime", 0))
+        start_ts = sleep.get("start", sleep.get("startTime", 0))
+        end_ts   = sleep.get("end",   sleep.get("endTime", 0))
 
-            if isinstance(start_ts, (int, float)) and start_ts > 1000000000:
-                start_dt = datetime.fromtimestamp(start_ts)
-                end_dt   = datetime.fromtimestamp(end_ts)
-            else:
-                start_dt = datetime.fromisoformat(str(start_ts))
-                end_dt   = datetime.fromisoformat(str(end_ts))
+        if isinstance(start_ts, (int, float)) and start_ts > 1000000000:
+            start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+            end_dt   = datetime.fromtimestamp(end_ts,   tz=timezone.utc)
+        else:
+            start_dt = _parse_iso_datetime(str(start_ts))
+            end_dt   = _parse_iso_datetime(str(end_ts))
 
-            duration = int((end_dt - start_dt).total_seconds() / 60)
+        duration = int((end_dt - start_dt).total_seconds() / 60)
+        if duration <= 0:
+            raise HTTPException(status_code=400, detail="Некорректная длительность сна")
 
-            data = {
-                "date": start_dt.strftime("%Y-%m-%d"),
-                "start_time": start_dt.isoformat(),
-                "end_time": end_dt.isoformat(),
-                "duration_minutes": duration,
-                "phase_deep":  int(sleep.get("deepSleepDuration", sleep.get("lightSleepDuration", 0))),
-                "phase_light": int(sleep.get("lightSleepDuration", 0)),
-                "phase_rem":   int(sleep.get("remSleepDuration", 0)),
-                "phase_awake": int(sleep.get("awakeDuration", 0)),
-                "heart_rate_avg": sleep.get("heartRateAverage", sleep.get("heartRate")),
-                "heart_rate_min": sleep.get("heartRateMin"),
-                "heart_rate_max": sleep.get("heartRateMax"),
-                "spo2_avg": sleep.get("spo2Average", sleep.get("spo2")),
-                "spo2_min": sleep.get("spo2Min"),
-                "awakenings_count": int(sleep.get("wakeupCount", 0)),
-                "sleep_score": None,
-                "source": "gadgetbridge",
-            }
+        # ВАЖНО: deep НЕ fallback'ит на light — это разные фазы
+        deep  = int(sleep.get("deepSleepDuration", 0) or 0)
+        light = int(sleep.get("lightSleepDuration", 0) or 0)
+        rem   = int(sleep.get("remSleepDuration", 0) or 0)
+        awake = int(sleep.get("awakeDuration", 0) or 0)
 
-            save_sleep_record(data, user_id)
-            return {"status": "ok", "message": "Данные сна сохранены", "date": data["date"]}
+        data = {
+            "date": start_dt.strftime("%Y-%m-%d"),
+            "start_time": start_dt.isoformat(),
+            "end_time": end_dt.isoformat(),
+            "duration_minutes": duration,
+            "phase_deep":  deep,
+            "phase_light": light,
+            "phase_rem":   rem,
+            "phase_awake": awake,
+            "heart_rate_avg": sleep.get("heartRateAverage", sleep.get("heartRate")),
+            "heart_rate_min": sleep.get("heartRateMin"),
+            "heart_rate_max": sleep.get("heartRateMax"),
+            "spo2_avg": sleep.get("spo2Average", sleep.get("spo2")),
+            "spo2_min": sleep.get("spo2Min"),
+            "awakenings_count": int(sleep.get("wakeupCount", 0) or 0),
+            "sleep_score": None,
+            "source": "gadgetbridge",
+        }
 
-        return {"status": "ok", "message": "Данные получены"}
+        save_sleep_record(data, user_id)
+        return {"status": "ok", "message": "Данные сна сохранены", "date": data["date"]}
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка парсинга: {str(e)}")

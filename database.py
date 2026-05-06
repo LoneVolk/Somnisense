@@ -13,7 +13,7 @@ load_dotenv()
 # ─────────────────────────────────────────
 
 def get_connection():
-    conn = psycopg2.connect(os.environ["postgresql://postgres.sdqxpqwqpgmgjjhbrtbo:Somnisense5233@aws-1-ap-south-1.pooler.supabase.com:6543/postgres"], sslmode="require")
+    conn = psycopg2.connect(os.environ["DATABASE_URL"], sslmode="require")
     return conn
 
 

@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "Sleep Analyzer",
+    "slug": "sleep-analyzer",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#0A0E1A"
+    },
+    "android": {
+      "package": "com.sleepanalyzer.app"
+    },
+    "plugins": [
+      "expo-document-picker",
+      "expo-font"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "0d92605d-14b9-4359-a351-53e2d7dc5f80"
+      }
+    }
+  }
+}

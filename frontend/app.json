@@ -14,7 +14,8 @@
     },
     "plugins": [
       "expo-document-picker",
-      "expo-font"
+      "expo-font",
+      "react-native-health-connect"
     ],
     "extra": {
       "eas": {

@@ -36,7 +36,7 @@ export default function SettingsScreen({ navigation }) {
   const handleCSV = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        type: ["text/csv", "text/comma-separated-values", "application/csv", "*/*"],
+        type: "text/comma-separated-values",
         copyToCacheDirectory: true,
       });
 
@@ -115,9 +115,9 @@ export default function SettingsScreen({ navigation }) {
             </Text>
             <TouchableOpacity
               style={styles.linkBtn}
-              onPress={() => Linking.openURL("https://health.google/health-connect-android/")}
+              onPress={() => navigation.navigate("HealthConnect")}
             >
-              <Text style={styles.linkText}>Подробнее о Health Connect →</Text>
+              <Text style={styles.linkText}>Настроить Health Connect →</Text>
             </TouchableOpacity>
           </Card>
 

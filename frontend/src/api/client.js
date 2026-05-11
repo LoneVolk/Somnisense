@@ -1,7 +1,6 @@
 // src/api/client.js
 import axios from "axios";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import * as FileSystem from "expo-file-system";
 
 const BASE_URL = "https://web-production-e9298.up.railway.app";
 
@@ -101,34 +100,36 @@ export const loadSimulation = async (days = 30) => {
 };
 
 /**
- * CSV upload через FileSystem.uploadAsync.
- * Это надёжнее multipart/form-data в React Native.
+ * CSV upload через нативный fetch + FormData.
+ * Никаких зависимостей от expo-file-system — работает в любой версии SDK.
  */
 export const uploadCSV = async (fileUri, fileName) => {
-  console.log("CSV upload start:", fileName, fileUri);
+  console.log("CSV upload:", fileName, fileUri);
 
-  const result = await FileSystem.uploadAsync(
-    `${BASE_URL}/api/upload/csv`,
-    fileUri,
-    {
-      httpMethod: "POST",
-      uploadType: FileSystem.FileSystemUploadType.MULTIPART,
-      fieldName: "file",
-      mimeType: "text/csv",
-      parameters: {},
-    }
-  );
+  const formData = new FormData();
+  formData.append("file", {
+    uri: fileUri,
+    name: fileName || "data.csv",
+    type: "text/csv",
+  });
 
-  console.log("CSV upload status:", result.status);
+  const response = await fetch(`${BASE_URL}/api/upload/csv`, {
+    method: "POST",
+    body: formData,
+    // Намеренно НЕ устанавливаем Content-Type — fetch добавит multipart boundary сам
+  });
 
-  if (result.status >= 400) {
-    throw new Error(`Сервер вернул ${result.status}: ${result.body}`);
+  const text = await response.text();
+  console.log("CSV upload status:", response.status, text.substring(0, 200));
+
+  if (!response.ok) {
+    throw new Error(`Сервер вернул ${response.status}: ${text}`);
   }
 
   try {
-    return JSON.parse(result.body);
+    return JSON.parse(text);
   } catch {
-    throw new Error("Некорректный ответ сервера: " + result.body);
+    throw new Error("Некорректный ответ сервера: " + text);
   }
 };
 

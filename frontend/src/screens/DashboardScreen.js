@@ -153,26 +153,46 @@ export default function DashboardScreen({ navigation }) {
         {/* ── Статистика за 30 дней ────────────────────── */}
         <Section title="За 30 дней">
           <View style={styles.statsGrid}>
-            <Card style={styles.statCard}>
-              <Text style={styles.statValue}>
-                {summary?.avg_sleep_score?.toFixed(0) ?? "—"}
-              </Text>
-              <Text style={styles.statLabel}>Средний Score</Text>
-            </Card>
-            <Card style={styles.statCard}>
-              <Text style={styles.statValue}>
-                {summary?.avg_duration_minutes
-                  ? `${(summary.avg_duration_minutes / 60).toFixed(1)}ч`
-                  : "—"}
-              </Text>
-              <Text style={styles.statLabel}>Средний сон</Text>
-            </Card>
-            <Card style={styles.statCard}>
-              <Text style={[styles.statValue, { color: colors.severity.medium }]}>
-                {summary?.anomalies_last_30_days ?? "—"}
-              </Text>
-              <Text style={styles.statLabel}>Аномалий</Text>
-            </Card>
+            <TouchableOpacity
+              activeOpacity={0.7}
+              onPress={() => navigation.navigate("ScoreStats")}
+              style={{ flex: 1 }}
+            >
+              <Card style={styles.statCard}>
+                <Text style={styles.statValue}>
+                  {summary?.avg_sleep_score?.toFixed(0) ?? "—"}
+                </Text>
+                <Text style={styles.statLabel}>Средний Score</Text>
+              </Card>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              activeOpacity={0.7}
+              onPress={() => navigation.navigate("DurationStats")}
+              style={{ flex: 1 }}
+            >
+              <Card style={styles.statCard}>
+                <Text style={styles.statValue}>
+                  {summary?.avg_duration_minutes
+                    ? `${(summary.avg_duration_minutes / 60).toFixed(1)}ч`
+                    : "—"}
+                </Text>
+                <Text style={styles.statLabel}>Средний сон</Text>
+              </Card>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              activeOpacity={0.7}
+              onPress={() => navigation.navigate("Main", { screen: "Anomalies" })}
+              style={{ flex: 1 }}
+            >
+              <Card style={styles.statCard}>
+                <Text style={[styles.statValue, { color: colors.severity.medium }]}>
+                  {summary?.anomalies_last_30_days ?? "—"}
+                </Text>
+                <Text style={styles.statLabel}>Аномалий</Text>
+              </Card>
+            </TouchableOpacity>
           </View>
         </Section>
 

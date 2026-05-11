@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Sleep Analyzer",
-    "slug": "sleep-analyzer",
+    "slug": "somnisense",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
@@ -18,8 +18,9 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "0d92605d-14b9-4359-a351-53e2d7dc5f80"
+        "projectId": "3e473cc7-7132-45df-ba21-29297881174d"
       }
-    }
+    },
+    "owner": "botnymigee"
   }
 }

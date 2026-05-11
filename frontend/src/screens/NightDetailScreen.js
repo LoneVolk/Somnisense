@@ -36,33 +36,82 @@ function sy(v, min, max) { return PAD.t + (1 - (v - min) / (max - min)) * CH; }
 function SleepStagesChart({ record }) {
   const total = record.duration_minutes;
   if (!total) return <Text style={styles.noData}>Нет данных</Text>;
-  const deep = record.phase_deep || 0;
-  const rem = record.phase_rem || 0;
-  const cycles = Math.max(1, Math.round(total / 90));
-  const points = [];
-  let t = 0;
-  const step = total / (cycles * 6);
-  for (let c = 0; c < cycles; c++) {
-    points.push({ x: t, y: 2 }); t += step;
-    if (deep / total > 0.05 && c < Math.ceil(cycles * 0.6)) {
-      points.push({ x: t, y: 3 }); t += step * (1.5 - c * 0.15);
-      points.push({ x: t, y: 3 }); t += step * 0.5;
-    }
-    points.push({ x: t, y: 2 }); t += step * 0.5;
-    if (rem / total > 0.05 && c >= Math.floor(cycles * 0.3)) {
-      points.push({ x: t, y: 1 }); t += step * (0.5 + c * 0.1);
-      points.push({ x: t, y: 1 }); t += step * 0.3;
-    }
-    points.push({ x: t, y: 2 }); t = Math.min(t + step * 0.3, total);
+
+  // Маппинг типа фазы → Y-координата (0=Бодрств, 1=REM, 2=Лёгкий, 3=Глубокий)
+  const TYPE_TO_Y = { awake: 0, rem: 1, light: 2, deep: 3 };
+  const yLabels = ["Бодрств.", "REM", "Лёгкий", "Глубокий"];
+
+  // Парсим stages_json если есть — это РЕАЛЬНАЯ хронология
+  let realStages = null;
+  if (record.stages_json) {
+    try {
+      const parsed = JSON.parse(record.stages_json);
+      if (Array.isArray(parsed) && parsed.length > 0) realStages = parsed;
+    } catch {}
   }
-  points.push({ x: total, y: 0 });
+
+  // Точки для графика: либо реальные stages, либо синтез из суммарных минут
+  let points = [];
+
+  if (realStages) {
+    // Реальная хронология
+    const recordStart = record.start_time ? new Date(record.start_time).getTime() : null;
+    if (recordStart) {
+      for (const s of realStages) {
+        try {
+          const startMs = new Date(s.start).getTime();
+          const endMs = new Date(s.end).getTime();
+          const startMin = (startMs - recordStart) / 60000;
+          const endMin = (endMs - recordStart) / 60000;
+          const y = TYPE_TO_Y[s.type];
+          if (y === undefined) continue;
+          points.push({ x: Math.max(0, startMin), y });
+          points.push({ x: Math.min(total, endMin), y });
+        } catch {}
+      }
+    }
+  }
+
+  if (points.length === 0) {
+    // Fallback: старый синтетический алгоритм
+    const deep = record.phase_deep || 0;
+    const rem = record.phase_rem || 0;
+    const cycles = Math.max(1, Math.round(total / 90));
+    let t = 0;
+    const step = total / (cycles * 6);
+    for (let c = 0; c < cycles; c++) {
+      points.push({ x: t, y: 2 }); t += step;
+      if (deep / total > 0.05 && c < Math.ceil(cycles * 0.6)) {
+        points.push({ x: t, y: 3 }); t += step * (1.5 - c * 0.15);
+        points.push({ x: t, y: 3 }); t += step * 0.5;
+      }
+      points.push({ x: t, y: 2 }); t += step * 0.5;
+      if (rem / total > 0.05 && c >= Math.floor(cycles * 0.3)) {
+        points.push({ x: t, y: 1 }); t += step * (0.5 + c * 0.1);
+        points.push({ x: t, y: 1 }); t += step * 0.3;
+      }
+      points.push({ x: t, y: 2 }); t = Math.min(t + step * 0.3, total);
+    }
+    points.push({ x: total, y: 0 });
+  }
+
+  // Сортируем точки по x
+  points.sort((a, b) => a.x - b.x);
+
   let d = `M${sx(points[0].x, total).toFixed(1)},${sy(points[0].y, 0, 3).toFixed(1)}`;
   for (let i = 1; i < points.length; i++) {
     const px = sx(points[i].x, total).toFixed(1);
     d += ` L${px},${sy(points[i-1].y, 0, 3).toFixed(1)} L${px},${sy(points[i].y, 0, 3).toFixed(1)}`;
   }
   const fillD = d + ` L${sx(total, total).toFixed(1)},${(PAD.t+CH).toFixed(1)} L${PAD.l},${(PAD.t+CH).toFixed(1)} Z`;
-  const yLabels = ["Бодрств.", "REM", "Лёгкий", "Глубокий"];
+
+  // Метки часов на оси X
+  const hoursTotal = total / 60;
+  const hourMarks = [];
+  for (let h = 0; h <= Math.ceil(hoursTotal); h++) {
+    if (h * 60 <= total) hourMarks.push(h);
+  }
+
   return (
     <Svg width={CHART_W} height={CHART_H}>
       <Defs>
@@ -75,9 +124,10 @@ function SleepStagesChart({ record }) {
       <Path d={fillD} fill="url(#g1)"/>
       <Path d={d} stroke="#6C8EF5" strokeWidth={2} fill="none"/>
       {yLabels.map((l,i) => <SvgText key={i} x={PAD.l-4} y={sy(i,0,3)+4} textAnchor="end" fontSize={8} fill="#8899BB">{l}</SvgText>)}
-      {[0,1,2,3,4].map(h => <SvgText key={h} x={sx(h*60,total)} y={CHART_H-4} textAnchor="middle" fontSize={8} fill="#4A5568">{h}ч</SvgText>)}
+      {hourMarks.map(h => <SvgText key={h} x={sx(h*60,total)} y={CHART_H-4} textAnchor="middle" fontSize={8} fill="#4A5568">{h}ч</SvgText>)}
     </Svg>
   );
+}
 }
 
 function HeartRateChart({ record }) {

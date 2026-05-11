@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Body
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from datetime import date, datetime, timezone
@@ -23,6 +23,7 @@ from database import (
 )
 from analyzer import analyze_sleep, calculate_sleep_score
 from recommendations import generate_recommendations
+from stages import generate_stages_json
 
 # Нормальный импорт симулятора (вместо importlib.util)
 from connectors.simulator import SimulatorConnector
@@ -257,116 +258,19 @@ async def upload_csv(file: UploadFile = File(...), user_id: str = "default"):
             if not data["date"]:
                 continue
 
-            save_sleep_record(data, user_id)
-            saved_count += 1
-
-        except Exception as e:
-            errors.append(f"Строка {i+2}: {str(e)}")
-            if len(errors) > 10:
-                break
-
-    return {
-        "saved": saved_count,
-        "errors": errors[:10],
-        "message": f"Загружено {saved_count} записей"
-    }
-
-
-# ─────────────────────────────────────────
-#  CSV TEXT — приём CSV как plain text JSON
-#  (для мобильных где FormData не работает)
-# ─────────────────────────────────────────
-
-@app.post("/api/upload/csv-text")
-async def upload_csv_text(payload: dict = Body(...), user_id: str = "default"):
-    """
-    Принимает CSV как обычный JSON {"csv": "..."}.
-    Используется когда multipart/form-data ненадёжен (мобильные React Native).
-    """
-    text = payload.get("csv", "")
-    if not text:
-        raise HTTPException(status_code=400, detail="Пустой csv")
-
-    if len(text.encode("utf-8")) > MAX_CSV_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Файл слишком большой (максимум {MAX_CSV_BYTES // (1024 * 1024)} МБ)"
-        )
-
-    reader = csv.DictReader(io.StringIO(text))
-    headers = reader.fieldnames or []
-
-    saved_count = 0
-    errors = []
-    is_rich_format = "sleep_start_timestamp" in headers or "date_recorded" in headers
-
-    for i, row in enumerate(reader):
-        if saved_count >= MAX_CSV_ROWS:
-            break
-        try:
-            if is_rich_format:
-                date_str = row.get("date_recorded", row.get("date", ""))[:10]
-                start_time = row.get("sleep_start_timestamp", row.get("start_time", ""))
-                end_time = row.get("sleep_end_timestamp", row.get("end_time", ""))
-                duration = int(float(row.get("duration_minutes", 0)))
-                total = duration if duration > 0 else 1
-
-                deep_pct  = float(row.get("sleep_stage_deep_pct", 0)) / 100
-                light_pct = float(row.get("sleep_stage_light_pct", 0)) / 100
-                rem_pct   = float(row.get("sleep_stage_rem_pct", 0)) / 100
-                awake_pct = float(row.get("sleep_stage_awake_pct", 0)) / 100
-
-                hr_avg  = float(row["heart_rate_mean_bpm"]) if row.get("heart_rate_mean_bpm") else None
-                hr_min  = float(row["heart_rate_min_bpm"])  if row.get("heart_rate_min_bpm")  else None
-                hr_max  = float(row["heart_rate_max_bpm"])  if row.get("heart_rate_max_bpm")  else None
-                spo2    = float(row["spo2_mean_pct"])        if row.get("spo2_mean_pct")        else None
-                spo2min = float(row["spo2_min_pct"])         if row.get("spo2_min_pct")         else None
-                score   = int(float(row["sleep_score"]))     if row.get("sleep_score")          else None
-                awake_c = int(float(row.get("wake_after_sleep_onset_minutes", 0)))
-
-                data = {
-                    "date": date_str,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "duration_minutes": duration,
-                    "phase_deep":  int(total * deep_pct),
-                    "phase_light": int(total * light_pct),
-                    "phase_rem":   int(total * rem_pct),
-                    "phase_awake": int(total * awake_pct),
-                    "heart_rate_avg": hr_avg,
-                    "heart_rate_min": hr_min,
-                    "heart_rate_max": hr_max,
-                    "spo2_avg": spo2,
-                    "spo2_min": spo2min,
-                    "awakenings_count": awake_c,
-                    "sleep_score": score,
-                    "source": "csv",
-                }
-            else:
-                data = {
-                    "date": row.get("date", ""),
-                    "start_time": row.get("start_time", ""),
-                    "end_time": row.get("end_time", ""),
-                    "duration_minutes": int(float(row.get("duration_minutes", 0))),
-                    "phase_light": int(float(row.get("phase_light", 0))),
-                    "phase_deep":  int(float(row.get("phase_deep", 0))),
-                    "phase_rem":   int(float(row.get("phase_rem", 0))),
-                    "phase_awake": int(float(row.get("phase_awake", 0))),
-                    "heart_rate_avg": float(row["heart_rate_avg"]) if row.get("heart_rate_avg") else None,
-                    "heart_rate_min": None,
-                    "heart_rate_max": None,
-                    "spo2_avg": float(row["spo2_avg"]) if row.get("spo2_avg") else None,
-                    "spo2_min": None,
-                    "awakenings_count": int(float(row.get("awakenings_count", 0))),
-                    "sleep_score": None,
-                    "source": "csv",
-                }
-
-            if not data["date"]:
-                continue
+            # Генерим синтетические stages для CSV (реальной хронологии нет)
+            data["stages_json"] = generate_stages_json(
+                data.get("start_time", "") or f"{data['date']}T23:00:00",
+                data.get("duration_minutes", 0),
+                data.get("phase_deep", 0),
+                data.get("phase_light", 0),
+                data.get("phase_rem", 0),
+                data.get("phase_awake", 0),
+            )
 
             save_sleep_record(data, user_id)
             saved_count += 1
+
         except Exception as e:
             errors.append(f"Строка {i+2}: {str(e)}")
             if len(errors) > 10:
@@ -408,7 +312,15 @@ async def load_simulation(user_id: str = "default", days: int = 30):
             "spo2_min": record.spo2_min,
             "awakenings_count": record.awakenings_count,
             "source": "simulator",
-            "sleep_score": score
+            "sleep_score": score,
+            "stages_json": generate_stages_json(
+                str(record.start_time),
+                record.duration_minutes,
+                record.phases.deep,
+                record.phases.light,
+                record.phases.rem,
+                record.phases.awake,
+            ),
         }
         save_sleep_record(data, user_id)
         saved += 1
@@ -598,15 +510,23 @@ async def receive_health_connect(payload: dict, user_id: str = "default"):
             # Подсчёт фаз из stages
             stages = session.get("stages", [])
             deep = light = rem = awake = 0
+            stages_list = []
             for s in stages:
                 stage_type = s.get("stage", 0)
                 s_start = _parse_iso_datetime(s["startTime"])
                 s_end   = _parse_iso_datetime(s["endTime"])
                 mins = max(0, int((s_end - s_start).total_seconds() / 60))
-                if stage_type == 4:   deep  += mins
-                elif stage_type == 3: light += mins
-                elif stage_type == 5: rem   += mins
-                elif stage_type == 2: awake += mins
+                type_name = None
+                if stage_type == 4:   deep  += mins; type_name = "deep"
+                elif stage_type == 3: light += mins; type_name = "light"
+                elif stage_type == 5: rem   += mins; type_name = "rem"
+                elif stage_type == 2: awake += mins; type_name = "awake"
+                if type_name and mins > 0:
+                    stages_list.append({
+                        "start": s_start.isoformat(),
+                        "end": s_end.isoformat(),
+                        "type": type_name,
+                    })
 
             data = {
                 "date": date_str,
@@ -625,6 +545,7 @@ async def receive_health_connect(payload: dict, user_id: str = "default"):
                 "awakenings_count": session.get("awakeningsCount", 0),
                 "sleep_score": None,
                 "source": "health_connect",
+                "stages_json": json.dumps(stages_list, ensure_ascii=False) if stages_list else None,
             }
 
             save_sleep_record(data, user_id)
@@ -675,6 +596,34 @@ async def gadgetbridge_webhook(payload: dict, user_id: str = "default"):
         rem   = int(sleep.get("remSleepDuration", 0) or 0)
         awake = int(sleep.get("awakeDuration", 0) or 0)
 
+        # Если Gadgetbridge прислал массив stages — парсим хронологию
+        raw_stages = sleep.get("stages") or sleep.get("Stages") or []
+        stages_list = []
+        for s in raw_stages:
+            try:
+                s_start_raw = s.get("start") or s.get("startTime")
+                s_end_raw = s.get("end") or s.get("endTime")
+                s_type = (s.get("type") or s.get("Type") or "").lower()
+                if not s_start_raw or not s_end_raw or s_type not in ("deep", "light", "rem", "awake"):
+                    continue
+                if isinstance(s_start_raw, (int, float)) and s_start_raw > 1_000_000_000:
+                    s_start = datetime.fromtimestamp(s_start_raw, tz=timezone.utc)
+                    s_end = datetime.fromtimestamp(s_end_raw, tz=timezone.utc)
+                else:
+                    s_start = _parse_iso_datetime(str(s_start_raw))
+                    s_end = _parse_iso_datetime(str(s_end_raw))
+                stages_list.append({
+                    "start": s_start.isoformat(),
+                    "end": s_end.isoformat(),
+                    "type": s_type,
+                })
+            except Exception:
+                continue
+
+        stages_json_value = json.dumps(stages_list, ensure_ascii=False) if stages_list else generate_stages_json(
+            start_dt.isoformat(), duration, deep, light, rem, awake
+        )
+
         data = {
             "date": start_dt.strftime("%Y-%m-%d"),
             "start_time": start_dt.isoformat(),
@@ -692,6 +641,7 @@ async def gadgetbridge_webhook(payload: dict, user_id: str = "default"):
             "awakenings_count": int(sleep.get("wakeupCount", 0) or 0),
             "sleep_score": None,
             "source": "gadgetbridge",
+            "stages_json": stages_json_value,
         }
 
         save_sleep_record(data, user_id)

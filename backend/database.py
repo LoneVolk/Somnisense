@@ -41,9 +41,16 @@ def init_db():
             sleep_score       INTEGER,
             awakenings_count  INTEGER DEFAULT 0,
             source            TEXT    DEFAULT 'unknown',
+            stages_json       TEXT,
             created_at        TIMESTAMP DEFAULT NOW(),
             UNIQUE(user_id, date)
         )
+    """)
+
+    # Миграция: добавить stages_json если её ещё нет (для старых БД)
+    cur.execute("""
+        ALTER TABLE sleep_records
+        ADD COLUMN IF NOT EXISTS stages_json TEXT
     """)
 
     cur.execute("""
@@ -111,6 +118,8 @@ def init_db():
 # ─────────────────────────────────────────
 
 def save_sleep_record(record: dict, user_id: str = "default") -> int:
+    # stages_json — опциональное поле, дефолт None
+    record.setdefault("stages_json", None)
     conn = get_connection()
     cur = conn.cursor()
     try:
@@ -119,12 +128,12 @@ def save_sleep_record(record: dict, user_id: str = "default") -> int:
                 user_id, date, start_time, end_time, duration_minutes,
                 phase_light, phase_deep, phase_rem, phase_awake,
                 heart_rate_avg, heart_rate_min, heart_rate_max,
-                spo2_avg, spo2_min, sleep_score, awakenings_count, source
+                spo2_avg, spo2_min, sleep_score, awakenings_count, source, stages_json
             ) VALUES (
                 %(user_id)s, %(date)s, %(start_time)s, %(end_time)s, %(duration_minutes)s,
                 %(phase_light)s, %(phase_deep)s, %(phase_rem)s, %(phase_awake)s,
                 %(heart_rate_avg)s, %(heart_rate_min)s, %(heart_rate_max)s,
-                %(spo2_avg)s, %(spo2_min)s, %(sleep_score)s, %(awakenings_count)s, %(source)s
+                %(spo2_avg)s, %(spo2_min)s, %(sleep_score)s, %(awakenings_count)s, %(source)s, %(stages_json)s
             )
             ON CONFLICT (user_id, date) DO UPDATE SET
                 start_time       = EXCLUDED.start_time,
@@ -141,7 +150,8 @@ def save_sleep_record(record: dict, user_id: str = "default") -> int:
                 spo2_min         = EXCLUDED.spo2_min,
                 sleep_score      = EXCLUDED.sleep_score,
                 awakenings_count = EXCLUDED.awakenings_count,
-                source           = EXCLUDED.source
+                source           = EXCLUDED.source,
+                stages_json      = COALESCE(EXCLUDED.stages_json, sleep_records.stages_json)
             RETURNING id
         """, {**record, "user_id": user_id})
         record_id = cur.fetchone()[0]

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Body
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from datetime import date, datetime, timezone
@@ -260,6 +260,113 @@ async def upload_csv(file: UploadFile = File(...), user_id: str = "default"):
             save_sleep_record(data, user_id)
             saved_count += 1
 
+        except Exception as e:
+            errors.append(f"Строка {i+2}: {str(e)}")
+            if len(errors) > 10:
+                break
+
+    return {
+        "saved": saved_count,
+        "errors": errors[:10],
+        "message": f"Загружено {saved_count} записей"
+    }
+
+
+# ─────────────────────────────────────────
+#  CSV TEXT — приём CSV как plain text JSON
+#  (для мобильных где FormData не работает)
+# ─────────────────────────────────────────
+
+@app.post("/api/upload/csv-text")
+async def upload_csv_text(payload: dict = Body(...), user_id: str = "default"):
+    """
+    Принимает CSV как обычный JSON {"csv": "..."}.
+    Используется когда multipart/form-data ненадёжен (мобильные React Native).
+    """
+    text = payload.get("csv", "")
+    if not text:
+        raise HTTPException(status_code=400, detail="Пустой csv")
+
+    if len(text.encode("utf-8")) > MAX_CSV_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Файл слишком большой (максимум {MAX_CSV_BYTES // (1024 * 1024)} МБ)"
+        )
+
+    reader = csv.DictReader(io.StringIO(text))
+    headers = reader.fieldnames or []
+
+    saved_count = 0
+    errors = []
+    is_rich_format = "sleep_start_timestamp" in headers or "date_recorded" in headers
+
+    for i, row in enumerate(reader):
+        if saved_count >= MAX_CSV_ROWS:
+            break
+        try:
+            if is_rich_format:
+                date_str = row.get("date_recorded", row.get("date", ""))[:10]
+                start_time = row.get("sleep_start_timestamp", row.get("start_time", ""))
+                end_time = row.get("sleep_end_timestamp", row.get("end_time", ""))
+                duration = int(float(row.get("duration_minutes", 0)))
+                total = duration if duration > 0 else 1
+
+                deep_pct  = float(row.get("sleep_stage_deep_pct", 0)) / 100
+                light_pct = float(row.get("sleep_stage_light_pct", 0)) / 100
+                rem_pct   = float(row.get("sleep_stage_rem_pct", 0)) / 100
+                awake_pct = float(row.get("sleep_stage_awake_pct", 0)) / 100
+
+                hr_avg  = float(row["heart_rate_mean_bpm"]) if row.get("heart_rate_mean_bpm") else None
+                hr_min  = float(row["heart_rate_min_bpm"])  if row.get("heart_rate_min_bpm")  else None
+                hr_max  = float(row["heart_rate_max_bpm"])  if row.get("heart_rate_max_bpm")  else None
+                spo2    = float(row["spo2_mean_pct"])        if row.get("spo2_mean_pct")        else None
+                spo2min = float(row["spo2_min_pct"])         if row.get("spo2_min_pct")         else None
+                score   = int(float(row["sleep_score"]))     if row.get("sleep_score")          else None
+                awake_c = int(float(row.get("wake_after_sleep_onset_minutes", 0)))
+
+                data = {
+                    "date": date_str,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "duration_minutes": duration,
+                    "phase_deep":  int(total * deep_pct),
+                    "phase_light": int(total * light_pct),
+                    "phase_rem":   int(total * rem_pct),
+                    "phase_awake": int(total * awake_pct),
+                    "heart_rate_avg": hr_avg,
+                    "heart_rate_min": hr_min,
+                    "heart_rate_max": hr_max,
+                    "spo2_avg": spo2,
+                    "spo2_min": spo2min,
+                    "awakenings_count": awake_c,
+                    "sleep_score": score,
+                    "source": "csv",
+                }
+            else:
+                data = {
+                    "date": row.get("date", ""),
+                    "start_time": row.get("start_time", ""),
+                    "end_time": row.get("end_time", ""),
+                    "duration_minutes": int(float(row.get("duration_minutes", 0))),
+                    "phase_light": int(float(row.get("phase_light", 0))),
+                    "phase_deep":  int(float(row.get("phase_deep", 0))),
+                    "phase_rem":   int(float(row.get("phase_rem", 0))),
+                    "phase_awake": int(float(row.get("phase_awake", 0))),
+                    "heart_rate_avg": float(row["heart_rate_avg"]) if row.get("heart_rate_avg") else None,
+                    "heart_rate_min": None,
+                    "heart_rate_max": None,
+                    "spo2_avg": float(row["spo2_avg"]) if row.get("spo2_avg") else None,
+                    "spo2_min": None,
+                    "awakenings_count": int(float(row.get("awakenings_count", 0))),
+                    "sleep_score": None,
+                    "source": "csv",
+                }
+
+            if not data["date"]:
+                continue
+
+            save_sleep_record(data, user_id)
+            saved_count += 1
         except Exception as e:
             errors.append(f"Строка {i+2}: {str(e)}")
             if len(errors) > 10:

@@ -128,7 +128,7 @@ function SleepStagesChart({ record }) {
     </Svg>
   );
 }
-}
+
 
 function HeartRateChart({ record }) {
   const total = record.duration_minutes;

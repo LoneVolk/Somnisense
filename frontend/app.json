@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Sleep Analyzer",
-    "slug": "somnisense",
+    "slug": "sleep-analyzer",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
@@ -10,18 +10,24 @@
       "backgroundColor": "#0A0E1A"
     },
     "android": {
-      "package": "com.sleepanalyzer.app"
+      "package": "com.sleepanalyzer.app",
+      "minSdkVersion": 26
     },
     "plugins": [
       "expo-document-picker",
-      "expo-font",
-      "react-native-health-connect"
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 26
+          }
+        }
+      ]
     ],
     "extra": {
       "eas": {
-        "projectId": "3e473cc7-7132-45df-ba21-29297881174d"
+        "projectId": "0d92605d-14b9-4359-a351-53e2d7dc5f80"
       }
-    },
-    "owner": "botnymigee"
+    }
   }
 }

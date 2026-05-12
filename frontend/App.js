@@ -6,12 +6,15 @@ import { Text } from "react-native";
 
 import { colors } from "./src/theme";
 
-import DashboardScreen   from "./src/screens/DashboardScreen";
-import AnomaliesScreen   from "./src/screens/AnomaliesScreen";
-import JournalScreen     from "./src/screens/JournalScreen";
-import SettingsScreen    from "./src/screens/SettingsScreen";
-import NightDetailScreen from "./src/screens/NightDetailScreen";
-import HealthConnectScreen from "./src/screens/HealthConnectScreen";
+import DashboardScreen      from "./src/screens/DashboardScreen";
+import AnomaliesScreen      from "./src/screens/AnomaliesScreen";
+import JournalScreen        from "./src/screens/JournalScreen";
+import SettingsScreen       from "./src/screens/SettingsScreen";
+import NightDetailScreen    from "./src/screens/NightDetailScreen";
+import HealthConnectScreen  from "./src/screens/HealthConnectScreen";
+import HistoryScreen        from "./src/screens/HistoryScreen";
+import ScoreStatsScreen     from "./src/screens/ScoreStatsScreen";
+import DurationStatsScreen  from "./src/screens/DurationStatsScreen";
 
 const Tab   = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -66,9 +69,12 @@ export default function App() {
   return (
     <NavigationContainer>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="Main"        component={TabNavigator} />
-        <Stack.Screen name="NightDetail" component={NightDetailScreen} />
+        <Stack.Screen name="Main"          component={TabNavigator} />
+        <Stack.Screen name="NightDetail"   component={NightDetailScreen} />
         <Stack.Screen name="HealthConnect" component={HealthConnectScreen} />
+        <Stack.Screen name="History"       component={HistoryScreen} />
+        <Stack.Screen name="ScoreStats"    component={ScoreStatsScreen} />
+        <Stack.Screen name="DurationStats" component={DurationStatsScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

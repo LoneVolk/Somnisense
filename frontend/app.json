@@ -10,23 +10,24 @@
       "backgroundColor": "#0A0E1A"
     },
     "android": {
-      "package": "com.sleepanalyzer.app",
-      "minSdkVersion": 26
-    },
+  "package": "com.sleepanalyzer.app",
+  "minSdkVersion": 26,
+  "permissions": [
+    "android.permission.health.READ_SLEEP",
+    "android.permission.health.READ_HEART_RATE",
+    "android.permission.health.READ_OXYGEN_SATURATION"
+  ]
+},
     "plugins": [
-      "expo-document-picker",
-      [
-        "expo-build-properties",
-        {
-          "android": {
-            "minSdkVersion": 26
-          }
-        }
-      ]
-    ],
+  "expo-document-picker",
+  ["expo-build-properties", { "android": { "minSdkVersion": 26 } }],
+  ["react-native-health-connect", {
+    "package": "com.sleepanalyzer.app"
+  }]
+],
     "extra": {
       "eas": {
-        "projectId": "0d92605d-14b9-4359-a351-53e2d7dc5f80"
+        "projectId": "a315fe40-00a4-4c93-aca9-f1859a559db5"
       }
     }
   }

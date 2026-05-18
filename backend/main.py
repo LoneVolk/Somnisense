@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 import json
 import csv
 import io
@@ -26,6 +26,59 @@ from recommendations import generate_recommendations
 
 # Нормальный импорт симулятора (вместо importlib.util)
 from connectors.simulator import SimulatorConnector
+
+# ─────────────────────────────────────────
+#  ГЕНЕРАТОР ПРОБУЖДЕНИЙ (для симулятора / CSV)
+# ─────────────────────────────────────────
+
+import random
+
+def generate_awakenings_json(
+    start_time_iso: str,
+    duration_minutes: int,
+    count: int,
+    seed: int = None,
+) -> str | None:
+    """
+    Генерирует синтетический массив пробуждений для записей без реальной хронологии.
+    Возвращает JSON-строку: [{time, duration_min, type}, ...]
+    type: 'micro' (<3 мин), 'full' (≥3 мин).
+    """
+    if not duration_minutes or duration_minutes <= 0 or count <= 0:
+        return json.dumps([])
+
+    try:
+        start_dt = datetime.fromisoformat(start_time_iso.replace("Z", "+00:00"))
+    except Exception:
+        return json.dumps([])
+
+    rng = random.Random(seed if seed is not None else hash(start_time_iso) & 0xFFFFFFFF)
+    awakenings = []
+
+    # Распределяем пробуждения равномерно по ночи, чуть чаще ближе к утру
+    for _ in range(count):
+        # Биас в сторону второй половины ночи (когда сон легче)
+        offset_pct = rng.betavariate(2, 1.5)  # сдвиг к концу
+        offset_min = int(duration_minutes * offset_pct)
+        wake_time = start_dt + timedelta(minutes=offset_min)
+
+        # Длительность: 70% коротких (1-3 мин), 30% длинных (3-15 мин)
+        if rng.random() < 0.7:
+            dur = rng.randint(1, 3)
+            wtype = "micro"
+        else:
+            dur = rng.randint(3, 15)
+            wtype = "full"
+
+        awakenings.append({
+            "time": wake_time.isoformat(),
+            "duration_min": dur,
+            "type": wtype,
+        })
+
+    awakenings.sort(key=lambda a: a["time"])
+    return json.dumps(awakenings, ensure_ascii=False)
+
 
 # ─────────────────────────────────────────
 #  КОНСТАНТЫ
@@ -257,6 +310,13 @@ async def upload_csv(file: UploadFile = File(...), user_id: str = "default"):
             if not data["date"]:
                 continue
 
+            # Генерируем синтетические пробуждения (CSV не содержит хронологии)
+            data["awakenings_json"] = generate_awakenings_json(
+                data.get("start_time", "") or f"{data['date']}T23:00:00",
+                data.get("duration_minutes", 0),
+                data.get("awakenings_count", 0),
+            )
+
             save_sleep_record(data, user_id)
             saved_count += 1
 
@@ -301,7 +361,12 @@ async def load_simulation(user_id: str = "default", days: int = 30):
             "spo2_min": record.spo2_min,
             "awakenings_count": record.awakenings_count,
             "source": "simulator",
-            "sleep_score": score
+            "sleep_score": score,
+            "awakenings_json": generate_awakenings_json(
+                str(record.start_time),
+                record.duration_minutes,
+                record.awakenings_count,
+            ),
         }
         save_sleep_record(data, user_id)
         saved += 1
@@ -488,9 +553,10 @@ async def receive_health_connect(payload: dict, user_id: str = "default"):
             # Дата сна = локальная дата начала сна (по tz клиента)
             date_str = start_dt.strftime("%Y-%m-%d")
 
-            # Подсчёт фаз из stages
+            # Подсчёт фаз из stages + сбор реальных пробуждений
             stages = session.get("stages", [])
             deep = light = rem = awake = 0
+            awakenings_list = []
             for s in stages:
                 stage_type = s.get("stage", 0)
                 s_start = _parse_iso_datetime(s["startTime"])
@@ -499,7 +565,14 @@ async def receive_health_connect(payload: dict, user_id: str = "default"):
                 if stage_type == 4:   deep  += mins
                 elif stage_type == 3: light += mins
                 elif stage_type == 5: rem   += mins
-                elif stage_type == 2: awake += mins
+                elif stage_type == 2:
+                    awake += mins
+                    if mins >= 1:  # игнорируем мгновенные движения
+                        awakenings_list.append({
+                            "time": s_start.isoformat(),
+                            "duration_min": mins,
+                            "type": "full" if mins >= 3 else "micro",
+                        })
 
             data = {
                 "date": date_str,
@@ -515,9 +588,10 @@ async def receive_health_connect(payload: dict, user_id: str = "default"):
                 "heart_rate_max": session.get("heartRateMax"),
                 "spo2_avg": session.get("spo2Avg"),
                 "spo2_min": session.get("spo2Min"),
-                "awakenings_count": session.get("awakeningsCount", 0),
+                "awakenings_count": len(awakenings_list) if awakenings_list else session.get("awakeningsCount", 0),
                 "sleep_score": None,
                 "source": "health_connect",
+                "awakenings_json": json.dumps(awakenings_list, ensure_ascii=False) if awakenings_list else None,
             }
 
             save_sleep_record(data, user_id)
@@ -567,6 +641,33 @@ async def gadgetbridge_webhook(payload: dict, user_id: str = "default"):
         light = int(sleep.get("lightSleepDuration", 0) or 0)
         rem   = int(sleep.get("remSleepDuration", 0) or 0)
         awake = int(sleep.get("awakeDuration", 0) or 0)
+        wakeup_count = int(sleep.get("wakeupCount", 0) or 0)
+
+        # Парсим массив пробуждений если Gadgetbridge их прислал
+        raw_wakeups = sleep.get("wakeups") or sleep.get("Wakeups") or []
+        awakenings_list = []
+        for w in raw_wakeups:
+            try:
+                w_time_raw = w.get("time") or w.get("startTime") or w.get("start")
+                w_dur = int(w.get("duration_min") or w.get("duration") or 1)
+                if isinstance(w_time_raw, (int, float)) and w_time_raw > 1_000_000_000:
+                    w_dt = datetime.fromtimestamp(w_time_raw, tz=timezone.utc)
+                else:
+                    w_dt = _parse_iso_datetime(str(w_time_raw))
+                awakenings_list.append({
+                    "time": w_dt.isoformat(),
+                    "duration_min": w_dur,
+                    "type": "full" if w_dur >= 3 else "micro",
+                })
+            except Exception:
+                continue
+
+        # Если массива не было — генерим синтетически из wakeupCount
+        awakenings_json_value = (
+            json.dumps(awakenings_list, ensure_ascii=False)
+            if awakenings_list
+            else generate_awakenings_json(start_dt.isoformat(), duration, wakeup_count)
+        )
 
         data = {
             "date": start_dt.strftime("%Y-%m-%d"),
@@ -582,9 +683,10 @@ async def gadgetbridge_webhook(payload: dict, user_id: str = "default"):
             "heart_rate_max": sleep.get("heartRateMax"),
             "spo2_avg": sleep.get("spo2Average", sleep.get("spo2")),
             "spo2_min": sleep.get("spo2Min"),
-            "awakenings_count": int(sleep.get("wakeupCount", 0) or 0),
+            "awakenings_count": wakeup_count,
             "sleep_score": None,
             "source": "gadgetbridge",
+            "awakenings_json": awakenings_json_value,
         }
 
         save_sleep_record(data, user_id)

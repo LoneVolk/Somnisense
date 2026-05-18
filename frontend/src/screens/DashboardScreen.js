@@ -2,19 +2,298 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   View, Text, ScrollView, StyleSheet,
-  RefreshControl, TouchableOpacity, StatusBar
+  RefreshControl, TouchableOpacity, StatusBar, Modal, Pressable
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { format, parseISO } from "date-fns";
 import { ru } from "date-fns/locale";
+import Svg, { Circle } from "react-native-svg";
 
 import { getSleepSummary, getSleepRecords, runAnalysis } from "../api/client";
 import { colors, spacing, typography, radius } from "../theme";
 import {
-  Card, ScoreCircle, MetricTile,
+  Card, MetricTile,
   PhaseBar, SeverityBadge, Section, Button
 } from "../components/ui";
 
+
+// ─────────────────────────────────────────
+//  ЦВЕТОВАЯ ЛОГИКА
+// ─────────────────────────────────────────
+
+const COLOR_GOOD = "#22C55E";   // зелёный
+const COLOR_WARN = "#EAB308";   // жёлтый
+const COLOR_BAD  = "#EF4444";   // красный
+
+function scoreColor(score) {
+  if (score == null) return colors.text.muted;
+  if (score >= 70) return COLOR_GOOD;
+  if (score >= 55) return COLOR_WARN;
+  return COLOR_BAD;
+}
+
+function scoreLabel(score) {
+  if (score == null) return "—";
+  if (score >= 85) return "ОТЛИЧНО";
+  if (score >= 70) return "ХОРОШИЙ";
+  if (score >= 55) return "СРЕДНИЙ";
+  return "ПЛОХОЙ";
+}
+
+function hoursColor(hours) {
+  if (hours == null) return colors.text.muted;
+  if (hours >= 7 && hours <= 9) return COLOR_GOOD;
+  if ((hours >= 6 && hours < 7) || (hours > 9 && hours <= 10)) return COLOR_WARN;
+  return COLOR_BAD;
+}
+
+function anomaliesColor(count) {
+  if (count == null) return colors.text.muted;
+  if (count === 0) return COLOR_GOOD;
+  if (count <= 5)  return COLOR_WARN;
+  return COLOR_BAD;
+}
+
+
+// ─────────────────────────────────────────
+//  SLEEP SCORE PROGRESS RING (SVG)
+// ─────────────────────────────────────────
+
+function SleepScoreRing({ score, size = 130, stroke = 10 }) {
+  const radius = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const normalized = score != null ? Math.max(0, Math.min(100, score)) : 0;
+  const offset = circumference - (normalized / 100) * circumference;
+  const color = scoreColor(score);
+
+  return (
+    <View style={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}>
+      <Svg width={size} height={size}>
+        {/* Фон-кольцо (всегда полное, тусклое) */}
+        <Circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          stroke={colors.bg.elevated}
+          strokeWidth={stroke}
+          fill="none"
+        />
+        {/* Прогресс-кольцо */}
+        <Circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          stroke={color}
+          strokeWidth={stroke}
+          fill="none"
+          strokeLinecap="round"
+          strokeDasharray={`${circumference} ${circumference}`}
+          strokeDashoffset={offset}
+          transform={`rotate(-90 ${size / 2} ${size / 2})`}
+        />
+      </Svg>
+      <View style={StyleSheet.absoluteFill}>
+        <View style={ringStyles.inner}>
+          <Text style={[ringStyles.score, { color }]}>
+            {score != null ? Math.round(score) : "—"}
+          </Text>
+          <Text style={ringStyles.label}>{scoreLabel(score)}</Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+const ringStyles = StyleSheet.create({
+  inner: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  score: {
+    fontSize: 36,
+    fontWeight: "800",
+    letterSpacing: -1,
+  },
+  label: {
+    fontSize: 9,
+    color: colors.text.secondary,
+    letterSpacing: 1.2,
+    marginTop: -2,
+    fontWeight: "700",
+  },
+});
+
+
+// ─────────────────────────────────────────
+//  AWAKENINGS MODAL
+// ─────────────────────────────────────────
+
+function AwakeningsModal({ visible, onClose, record }) {
+  let awakenings = [];
+  if (record?.awakenings_json) {
+    try {
+      const parsed = JSON.parse(record.awakenings_json);
+      if (Array.isArray(parsed)) awakenings = parsed;
+    } catch {}
+  }
+
+  const fullCount = awakenings.filter(a => a.type === "full").length;
+  const microCount = awakenings.filter(a => a.type === "micro").length;
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={onClose}
+    >
+      <Pressable style={modalStyles.backdrop} onPress={onClose}>
+        <Pressable style={modalStyles.card} onPress={(e) => e.stopPropagation()}>
+          <View style={modalStyles.header}>
+            <Text style={modalStyles.title}>Пробуждения</Text>
+            <TouchableOpacity onPress={onClose}>
+              <Text style={modalStyles.close}>✕</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Сводка */}
+          <View style={modalStyles.summary}>
+            <View style={modalStyles.summaryItem}>
+              <Text style={[modalStyles.summaryNum, { color: COLOR_BAD }]}>{fullCount}</Text>
+              <Text style={modalStyles.summaryLabel}>полных</Text>
+            </View>
+            <View style={modalStyles.summaryItem}>
+              <Text style={[modalStyles.summaryNum, { color: COLOR_WARN }]}>{microCount}</Text>
+              <Text style={modalStyles.summaryLabel}>микро</Text>
+            </View>
+            <View style={modalStyles.summaryItem}>
+              <Text style={[modalStyles.summaryNum, { color: colors.accent.primary }]}>
+                {awakenings.reduce((s, a) => s + (a.duration_min || 0), 0)}м
+              </Text>
+              <Text style={modalStyles.summaryLabel}>всего</Text>
+            </View>
+          </View>
+
+          {/* Список */}
+          <ScrollView style={{ maxHeight: 320 }}>
+            {awakenings.length === 0 ? (
+              <Text style={modalStyles.empty}>Нет данных о времени пробуждений</Text>
+            ) : (
+              awakenings.map((a, i) => {
+                let timeStr = "—";
+                try {
+                  timeStr = format(new Date(a.time), "HH:mm");
+                } catch {}
+                const isLong = a.type === "full";
+                return (
+                  <View key={i} style={modalStyles.row}>
+                    <View style={[modalStyles.dot, { backgroundColor: isLong ? COLOR_BAD : COLOR_WARN }]} />
+                    <Text style={modalStyles.time}>{timeStr}</Text>
+                    <Text style={modalStyles.duration}>{a.duration_min} мин</Text>
+                    <Text style={modalStyles.typeLabel}>{isLong ? "полное" : "микро"}</Text>
+                  </View>
+                );
+              })
+            )}
+          </ScrollView>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+const modalStyles = StyleSheet.create({
+  backdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.7)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: spacing.md,
+  },
+  card: {
+    width: "100%",
+    maxWidth: 400,
+    backgroundColor: colors.bg.secondary,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+  },
+  header: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: spacing.md,
+  },
+  title: {
+    fontSize: typography.sizes.lg,
+    fontWeight: "800",
+    color: colors.text.primary,
+  },
+  close: {
+    fontSize: 24,
+    color: colors.text.secondary,
+    padding: 4,
+  },
+  summary: {
+    flexDirection: "row",
+    justifyContent: "space-around",
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.bg.elevated,
+    borderRadius: radius.sm,
+    marginBottom: spacing.md,
+  },
+  summaryItem: {
+    alignItems: "center",
+  },
+  summaryNum: {
+    fontSize: typography.sizes.xl,
+    fontWeight: "800",
+  },
+  summaryLabel: {
+    fontSize: typography.sizes.xs,
+    color: colors.text.secondary,
+    marginTop: 2,
+  },
+  row: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.bg.elevated,
+    gap: spacing.sm,
+  },
+  dot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  time: {
+    fontSize: typography.sizes.md,
+    fontWeight: "700",
+    color: colors.text.primary,
+    width: 60,
+  },
+  duration: {
+    fontSize: typography.sizes.sm,
+    color: colors.text.primary,
+    flex: 1,
+  },
+  typeLabel: {
+    fontSize: typography.sizes.xs,
+    color: colors.text.secondary,
+    textTransform: "uppercase",
+  },
+  empty: {
+    color: colors.text.muted,
+    textAlign: "center",
+    padding: spacing.lg,
+  },
+});
+
+
+// ─────────────────────────────────────────
+//  ОСНОВНОЙ ЭКРАН
+// ─────────────────────────────────────────
 
 export default function DashboardScreen({ navigation }) {
   const [summary, setSummary]     = useState(null);
@@ -22,6 +301,7 @@ export default function DashboardScreen({ navigation }) {
   const [loading, setLoading]     = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [awakeModalOpen, setAwakeModalOpen] = useState(false);
 
   const loadData = async () => {
     try {
@@ -61,6 +341,9 @@ export default function DashboardScreen({ navigation }) {
   };
 
   const last = summary?.last_night;
+  const avgScore = summary?.avg_sleep_score;
+  const avgHours = summary?.avg_duration_minutes ? summary.avg_duration_minutes / 60 : null;
+  const anomCount = summary?.anomalies_last_30_days;
 
   return (
     <View style={styles.container}>
@@ -97,7 +380,7 @@ export default function DashboardScreen({ navigation }) {
         <Section title="Прошлая ночь">
           <Card style={styles.scoreCard}>
             <View style={styles.scoreRow}>
-              <ScoreCircle score={last?.sleep_score} size={110} />
+              <SleepScoreRing score={last?.sleep_score} size={130} stroke={10} />
               <View style={styles.scoreStats}>
                 <MetricTile
                   label="Продолжительность"
@@ -105,11 +388,16 @@ export default function DashboardScreen({ navigation }) {
                   icon="⏱"
                 />
                 <View style={{ height: spacing.sm }} />
-                <MetricTile
-                  label="Пробуждений"
-                  value={last?.awakenings_count ?? "—"}
-                  icon="👁"
-                />
+                <TouchableOpacity
+                  activeOpacity={0.7}
+                  onPress={() => last && setAwakeModalOpen(true)}
+                >
+                  <MetricTile
+                    label="Пробуждений ›"
+                    value={last?.awakenings_count ?? "—"}
+                    icon="👁"
+                  />
+                </TouchableOpacity>
               </View>
             </View>
 
@@ -150,7 +438,7 @@ export default function DashboardScreen({ navigation }) {
           </Card>
         </Section>
 
-        {/* ── Статистика за 30 дней ────────────────────── */}
+        {/* ── Статистика за 30 дней (цветная) ──────────── */}
         <Section title="За 30 дней">
           <View style={styles.statsGrid}>
             <TouchableOpacity
@@ -159,8 +447,8 @@ export default function DashboardScreen({ navigation }) {
               style={{ flex: 1 }}
             >
               <Card style={styles.statCard}>
-                <Text style={styles.statValue}>
-                  {summary?.avg_sleep_score?.toFixed(0) ?? "—"}
+                <Text style={[styles.statValue, { color: scoreColor(avgScore) }]}>
+                  {avgScore?.toFixed(0) ?? "—"}
                 </Text>
                 <Text style={styles.statLabel}>Средний Score</Text>
               </Card>
@@ -172,10 +460,8 @@ export default function DashboardScreen({ navigation }) {
               style={{ flex: 1 }}
             >
               <Card style={styles.statCard}>
-                <Text style={styles.statValue}>
-                  {summary?.avg_duration_minutes
-                    ? `${(summary.avg_duration_minutes / 60).toFixed(1)}ч`
-                    : "—"}
+                <Text style={[styles.statValue, { color: hoursColor(avgHours) }]}>
+                  {avgHours ? `${avgHours.toFixed(1)}ч` : "—"}
                 </Text>
                 <Text style={styles.statLabel}>Средний сон</Text>
               </Card>
@@ -187,8 +473,8 @@ export default function DashboardScreen({ navigation }) {
               style={{ flex: 1 }}
             >
               <Card style={styles.statCard}>
-                <Text style={[styles.statValue, { color: colors.severity.medium }]}>
-                  {summary?.anomalies_last_30_days ?? "—"}
+                <Text style={[styles.statValue, { color: anomaliesColor(anomCount) }]}>
+                  {anomCount ?? "—"}
                 </Text>
                 <Text style={styles.statLabel}>Аномалий</Text>
               </Card>
@@ -211,12 +497,7 @@ export default function DashboardScreen({ navigation }) {
                   const hours = r.duration_minutes / 60;
                   const maxH = 9;
                   const heightPct = Math.min(hours / maxH, 1);
-                  const score = r.sleep_score;
-                  const barColor = score >= 70
-                    ? colors.accent.primary
-                    : score >= 55
-                    ? colors.severity.medium
-                    : colors.severity.high;
+                  const barColor = scoreColor(r.sleep_score);
 
                   return (
                     <TouchableOpacity
@@ -224,7 +505,9 @@ export default function DashboardScreen({ navigation }) {
                       style={styles.barColumn}
                       onPress={() => navigation.navigate("NightDetail", { record: r })}
                     >
-                      <Text style={styles.barScore}>{score ?? ""}</Text>
+                      <Text style={[styles.barScore, { color: barColor }]}>
+                        {r.sleep_score ?? ""}
+                      </Text>
                       <View style={styles.barTrack}>
                         <View style={[
                           styles.bar,
@@ -250,6 +533,13 @@ export default function DashboardScreen({ navigation }) {
           style={{ marginBottom: spacing.xl }}
         />
       </ScrollView>
+
+      {/* Модалка пробуждений */}
+      <AwakeningsModal
+        visible={awakeModalOpen}
+        onClose={() => setAwakeModalOpen(false)}
+        record={last}
+      />
     </View>
   );
 }
@@ -287,7 +577,6 @@ const styles = StyleSheet.create({
     fontSize: 22,
   },
 
-  // Score карточка
   scoreCard: {
     gap: spacing.md,
   },
@@ -310,7 +599,6 @@ const styles = StyleSheet.create({
     letterSpacing: 0.8,
   },
 
-  // Статистика
   statsGrid: {
     flexDirection: "row",
     gap: spacing.sm,
@@ -323,7 +611,6 @@ const styles = StyleSheet.create({
   statValue: {
     fontSize: typography.sizes.xxl,
     fontWeight: "800",
-    color: colors.accent.primary,
     letterSpacing: -1,
   },
   statLabel: {
@@ -333,7 +620,6 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
 
-  // Мини-график
   miniChart: {
     flexDirection: "row",
     alignItems: "flex-end",
@@ -348,7 +634,7 @@ const styles = StyleSheet.create({
   },
   barScore: {
     fontSize: 9,
-    color: colors.text.secondary,
+    fontWeight: "700",
     marginBottom: 2,
   },
   barTrack: {

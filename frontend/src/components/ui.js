@@ -1,5 +1,4 @@
-// src/components/ui.js
-// Переиспользуемые UI компоненты с единой стилистикой
+
 
 import React from "react";
 import {

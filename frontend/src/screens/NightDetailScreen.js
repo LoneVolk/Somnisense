@@ -6,10 +6,10 @@ import {
 } from "react-native";
 import { format, parseISO } from "date-fns";
 import { ru } from "date-fns/locale";
-import Svg, { Path, Line, Rect, Text as SvgText, Defs, LinearGradient, Stop } from "react-native-svg";
+import Svg, { Path, Line, Rect, Text as SvgText, Defs, LinearGradient, Stop, Circle } from "react-native-svg";
 
 import { colors, spacing, typography, radius } from "../theme";
-import { Card, ScoreCircle, MetricTile, SeverityBadge, PhaseBar, Section } from "../components/ui";
+import { Card, MetricTile, SeverityBadge, PhaseBar, Section } from "../components/ui";
 import { getAnomalies } from "../api/client";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
@@ -32,6 +32,75 @@ function formatTime(str) {
 
 function sx(t, total) { return PAD.l + (t / total) * CW; }
 function sy(v, min, max) { return PAD.t + (1 - (v - min) / (max - min)) * CH; }
+
+// ─────────────────────────────────────────
+//  SLEEP SCORE PROGRESS RING
+// ─────────────────────────────────────────
+
+const COLOR_GOOD = "#22C55E";
+const COLOR_WARN = "#EAB308";
+const COLOR_BAD  = "#EF4444";
+
+function scoreColor(score) {
+  if (score == null) return colors.text.muted;
+  if (score >= 70) return COLOR_GOOD;
+  if (score >= 55) return COLOR_WARN;
+  return COLOR_BAD;
+}
+
+function scoreLabel(score) {
+  if (score == null) return "—";
+  if (score >= 85) return "ОТЛ";
+  if (score >= 70) return "ХОР";
+  if (score >= 55) return "НОРМ";
+  return "ПЛОХО";
+}
+
+function SleepScoreRing({ score, size = 56, stroke = 4 }) {
+  const radius = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const normalized = score != null ? Math.max(0, Math.min(100, score)) : 0;
+  const offset = circumference - (normalized / 100) * circumference;
+  const color = scoreColor(score);
+  const fontSize = size * 0.34;
+  const labelSize = size * 0.12;
+
+  return (
+    <View style={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}>
+      <Svg width={size} height={size}>
+        <Circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          stroke={colors.bg.elevated}
+          strokeWidth={stroke}
+          fill="none"
+        />
+        <Circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          stroke={color}
+          strokeWidth={stroke}
+          fill="none"
+          strokeLinecap="round"
+          strokeDasharray={`${circumference} ${circumference}`}
+          strokeDashoffset={offset}
+          transform={`rotate(-90 ${size / 2} ${size / 2})`}
+        />
+      </Svg>
+      <View style={{ position: "absolute", alignItems: "center", justifyContent: "center" }}>
+        <Text style={{ fontSize, fontWeight: "800", color, letterSpacing: -1 }}>
+          {score != null ? Math.round(score) : "—"}
+        </Text>
+        <Text style={{ fontSize: labelSize, fontWeight: "700", color: colors.text.secondary, marginTop: -2, letterSpacing: 0.8 }}>
+          {scoreLabel(score)}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
 
 function SleepStagesChart({ record }) {
   const total = record.duration_minutes;
@@ -220,7 +289,7 @@ export default function NightDetailScreen({ route, navigation }) {
           <Text style={styles.headerDate}>{format(parseISO(record.date), "d MMMM", { locale: ru })}</Text>
           <Text style={styles.headerTime}>{formatTime(record.start_time)} — {formatTime(record.end_time)}</Text>
         </View>
-        <ScoreCircle score={record.sleep_score} size={56}/>
+        <SleepScoreRing score={record.sleep_score} size={56} stroke={4}/>
       </View>
 
       <View style={styles.tabs}>
